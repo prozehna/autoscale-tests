@@ -1,0 +1,160 @@
+  `{{- if .IncludeService }}
+  apiVersion: v1
+  kind: Service
+  metadata:
+    name: win-webserver{{- if .NameSuffix }}-{{ .NameSuffix }}{{- end }}
+    labels:
+      app: win-webserver{{- if .NameSuffix }}-{{ .NameSuffix }}{{- end }}
+  spec:
+    ports:
+      - port: 80
+        targetPort: 80
+    selector:
+      app: win-webserver{{- if .NameSuffix }}-{{ .NameSuffix }}{{- end }}
+    type: LoadBalancer
+  ---
+    {{- end }}
+  apiVersion: apps/v1
+  kind: Deployment
+  metadata:
+    labels:
+      app: win-webserver{{- if .NameSuffix }}-{{ .NameSuffix }}{{- end }}
+    name: win-webserver{{- if .NameSuffix }}-{{ .NameSuffix }}{{- end }}
+  spec:
+    selector:
+      matchLabels:
+        app: win-webserver{{- if .NameSuffix }}-{{ .NameSuffix }}{{- end }}
+    replicas: {{ .Replicas }}
+    template:
+      metadata:
+        labels:
+          app: win-webserver{{- if .NameSuffix }}-{{ .NameSuffix }}{{- end }}
+        name: win-webserver{{- if .NameSuffix }}-{{ .NameSuffix }}{{- end }}
+      spec:
+        {{- if .RuntimeClassName }}
+        runtimeClassName: {{ .RuntimeClassName }}
+        {{- end }}
+        {{- if .IncludeTolerations }}
+        tolerations:
+          - key: "os"
+            value: "Windows"
+            operator: Equal
+            effect: "NoSchedule"
+          - key: "os"
+            value: "windows"
+            operator: Equal
+            effect: "NoSchedule"
+        {{- end }}
+        {{- if or .PVCName .ProjectedVolume }}
+        volumes:
+        {{- if .PVCName }}
+        - name: test-volume
+          persistentVolumeClaim:
+            claimName: {{ .PVCName }}
+        {{- end }}
+        {{- if .ProjectedVolume }}
+        - name: all-in-one
+          projected:
+            sources:
+              - secret:
+                  name: user
+              - secret:
+                  name: pass
+        {{- end }}
+        {{- end }}
+        containers:
+          - name: {{ .ContainerName }}
+            image: {{ .ImageName }}
+            imagePullPolicy: IfNotPresent
+            {{- if or .PVCName .ProjectedVolume }}
+            volumeMounts:
+            {{- if .PVCName }}
+            - mountPath: C:/html/
+              name: test-volume
+            {{- end }}
+            {{- if .ProjectedVolume }}
+            - name: all-in-one
+              mountPath: "/projected-volume"
+              readOnly: true
+            {{- end }}
+            {{- end }}
+            {{- if .IncludeSecurityContext }}
+            securityContext:
+              runAsNonRoot: false
+              windowsOptions:
+                runAsUserName: "ContainerAdministrator"
+            {{- end }}
+            {{- if .ResourceLimits }}
+            resources:
+              limits:
+                cpu: {{ .ResourceLimits }}
+                memory: 1Gi
+              requests:
+                cpu: {{ .ResourceLimits }}
+                memory: 512Mi
+            {{- end }}
+            command:
+            {{- if .MultilineCommand }}
+            - {{ .PowerShellExe }}
+            - -command
+            - |
+              {{- if .PVCName }}
+              echo '<html><body><H1>Windows Container Web Server</H1></body></html>' > C:/html/index.html;
+              $listener = New-Object System.Net.HttpListener;
+              $listener.Prefixes.Add('http://*:80/');
+              $listener.Start();
+              Write-Host('Listening at http://*:80/');
+              while ($listener.IsListening) {
+                $context = $listener.GetContext();
+                $response = $context.Response;
+                $content=Get-Content C:/html/index.html -Raw;
+                $buffer = [System.Text.Encoding]::UTF8.GetBytes($content);
+                $response.ContentLength64 = $buffer.Length;
+                $response.OutputStream.Write($buffer, 0, $buffer.Length);
+                $response.Close();
+              };
+              {{- else }}
+              $listener = New-Object System.Net.HttpListener;
+              $listener.Prefixes.Add('http://*:80/');
+              $listener.Start();
+              Write-Host('Listening at http://*:80/');
+              while ($listener.IsListening) {
+                $context = $listener.GetContext();
+                $response = $context.Response;
+                $content='<html><body><H1>Windows Container Web Server</H1></body></html>';
+                $buffer = [System.Text.Encoding]::UTF8.GetBytes($content);
+                $response.ContentLength64 = $buffer.Length;
+                $response.OutputStream.Write($buffer, 0, $buffer.Length);
+                $response.Close();
+              };
+              {{- end }}
+            {{- else }}
+            - {{ .PowerShellExe }}
+            - -command
+            {{- if .PVCName }}
+            - echo "<html><body><H1>Windows Container Web Server</H1></body></html>" > C:/html/index.html;$listener = New-Object System.Net.HttpListener; $listener.Prefixes.Add('http://*:80/'); $listener.Start();Write-Host('Listening at http://*:80/'); while ($listener.IsListening) { $context = $listener.GetContext(); $response = $context.Response; $content=Get-Content C:/html/index.html -Raw; $buffer = [System.Text.Encoding]::UTF8.GetBytes($content); $response.ContentLength64 = $buffer.Length; $response.OutputStream.Write($buffer, 0, $buffer.Length); $response.Close(); };
+            {{- else }}
+            - $listener = New-Object System.Net.HttpListener; $listener.Prefixes.Add('http://*:80/'); $listener.Start();Write-Host('Listening at http://*:80/'); while ($listener.IsListening) { $context = $listener.GetContext(); $response = $context.Response; $content='<html><body><H1>Windows Container Web Server</H1></body></html>'; $buffer = [System.Text.Encoding]::UTF8.GetBytes($content); $response.ContentLength64 = $buffer.Length; $response.OutputStream.Write($buffer, 0, $buffer.Length); $response.Close(); };
+            {{- end }}
+            {{- end }}
+            {{- if .ImagePullSecrets }}
+        imagePullSecrets:
+          - name: {{ .ImagePullSecrets }}
+            {{- end }}
+        nodeSelector:
+          {{- if .UseNewOSLabels }}
+          kubernetes.io/os: windows
+          {{- else }}
+          beta.kubernetes.io/os: windows
+          {{- end }}
+          {{- if .AdditionalNodeSelector }}
+          {{ .AdditionalNodeSelector }}
+          {{- end }}
+          {{- if .KernelID }}
+          node.kubernetes.io/windows-build: {{ .KernelID }}
+          {{- end }}
+        {{- if .UseNewOSLabels }}
+        os:
+          name: windows
+        {{- end }}
+    `
