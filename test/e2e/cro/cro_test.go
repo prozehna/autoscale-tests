@@ -602,6 +602,170 @@ var _ = Describe("Cluster Resource Override Operator", func() {
 		})
 	})
 
+	// Multiple ResourceOverride objects in the same namespace — the admission webhook
+	// sorts the matching ones by name and the first one alphabetically wins
+	Context("Multiple ResourceOverrides in the same namespace", func() {
+
+		BeforeEach(func() {
+			By("Checking the ResourceOverride CRD is installed")
+			exists, err := f.ResourceOverrideCRDExists(f.Ctx)
+			Expect(err).NotTo(HaveOccurred())
+			if !exists {
+				Skip("ResourceOverride CRD not present on this cluster — CRO operator is too old")
+			}
+
+			// This is the config the webhook falls back to when no ResourceOverride
+			// matches the pod: memory request = 50% of the 1024Mi limit = 512Mi
+			By("Ensuring ClusterResourceOverride CR exists with standard ratios")
+			err = f.CreateClusterResourceOverride(f.Ctx, framework.CROConfig{
+				LimitCPUToMemoryPercent:     100,
+				CPURequestToLimitPercent:    25,
+				MemoryRequestToLimitPercent: 50,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("Waiting for CRO admission webhook to become available")
+			err = f.WaitForClusterResourceOverrideReady(f.Ctx, 3*time.Minute)
+			Expect(err).NotTo(HaveOccurred(), "CRO admission webhook should become available")
+		})
+
+		It("should apply the lexicographically first ResourceOverride when several match", func() {
+			nsName := fmt.Sprintf("cro-roconflict-%d", time.Now().UnixNano())
+			By("Creating opt-in namespace")
+			err := f.CreateCROOptInNamespace(f.Ctx, nsName)
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(func() { _ = f.CleanupTestNamespace(f.Ctx, nsName) })
+
+			// Neither RO has a podSelector so both of them match every pod in the
+			// namespace. "aaa-override" sorts before "zzz-override" so it should win.
+			By("Creating ResourceOverride 'aaa-override' with MemReq=25")
+			err = f.CreateResourceOverride(f.Ctx, "aaa-override", nsName, framework.ROConfig{
+				LimitCPUToMemoryPercent:     100,
+				CPURequestToLimitPercent:    20,
+				MemoryRequestToLimitPercent: 25,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("Creating ResourceOverride 'zzz-override' with MemReq=75")
+			err = f.CreateResourceOverride(f.Ctx, "zzz-override", nsName, framework.ROConfig{
+				LimitCPUToMemoryPercent:     100,
+				CPURequestToLimitPercent:    80,
+				MemoryRequestToLimitPercent: 75,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("Waiting for the webhook informer to pick up both ResourceOverrides")
+			time.Sleep(30 * time.Second)
+
+			By("Creating pod with 1024Mi memory and 2000m CPU")
+			pod, err := f.CreatePodWithResources(f.Ctx, "test-roconflict", nsName, roTestContainers())
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(func() { _ = f.DeletePod(f.Ctx, pod.Name, nsName) })
+
+			container := findContainer(pod.Spec.Containers, "app")
+			Expect(container).NotTo(BeNil())
+			GinkgoWriter.Printf("[Test] Actual resources: CPU req=%s lim=%s, Mem req=%s lim=%s\n",
+				container.Resources.Requests.Cpu().String(), container.Resources.Limits.Cpu().String(),
+				container.Resources.Requests.Memory().String(), container.Resources.Limits.Memory().String())
+
+			By("Verifying memory request comes from 'aaa-override' (25% of 1024Mi = 256Mi)")
+			Expect(container.Resources.Requests.Memory().Value()).To(Equal(int64(256*1024*1024)),
+				"the alphabetically first ResourceOverride should have won")
+
+			By("Verifying the memory request is NOT the one from 'zzz-override' (75% = 768Mi)")
+			Expect(container.Resources.Requests.Memory().Value()).NotTo(Equal(int64(768 * 1024 * 1024)))
+
+			By("Verifying the memory request is NOT the CRO fallback (50% = 512Mi)")
+			Expect(container.Resources.Requests.Memory().Value()).NotTo(Equal(int64(512 * 1024 * 1024)))
+
+			By("Verifying CPU request is a fraction of the CPU limit (CPUReq=20%)")
+			cpuLimit := container.Resources.Limits.Cpu().MilliValue()
+			cpuReq := container.Resources.Requests.Cpu().MilliValue()
+			Expect(cpuReq).To(BeNumerically("<", cpuLimit))
+			Expect(cpuReq).To(BeNumerically(">", 0))
+		})
+
+		It("should switch to the next ResourceOverride after the winning one is deleted", func() {
+			nsName := fmt.Sprintf("cro-rodelete-%d", time.Now().UnixNano())
+			By("Creating opt-in namespace")
+			err := f.CreateCROOptInNamespace(f.Ctx, nsName)
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(func() { _ = f.CleanupTestNamespace(f.Ctx, nsName) })
+
+			By("Creating ResourceOverride 'aaa-override' with MemReq=25")
+			err = f.CreateResourceOverride(f.Ctx, "aaa-override", nsName, framework.ROConfig{
+				LimitCPUToMemoryPercent:     100,
+				CPURequestToLimitPercent:    20,
+				MemoryRequestToLimitPercent: 25,
+			})
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(func() { _ = f.DeleteResourceOverride(f.Ctx, "aaa-override", nsName) })
+
+			By("Creating ResourceOverride 'zzz-override' with MemReq=75")
+			err = f.CreateResourceOverride(f.Ctx, "zzz-override", nsName, framework.ROConfig{
+				LimitCPUToMemoryPercent:     100,
+				CPURequestToLimitPercent:    80,
+				MemoryRequestToLimitPercent: 75,
+			})
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(func() { _ = f.DeleteResourceOverride(f.Ctx, "zzz-override", nsName) })
+
+			By("Waiting for the webhook informer to pick up both ResourceOverrides")
+			time.Sleep(30 * time.Second)
+
+			By("Creating first pod — 'aaa-override' should win (25% of 1024Mi = 256Mi)")
+			first, err := f.CreatePodWithResources(f.Ctx, "test-rodelete-1", nsName, roTestContainers())
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(func() { _ = f.DeletePod(f.Ctx, first.Name, nsName) })
+
+			firstContainer := findContainer(first.Spec.Containers, "app")
+			Expect(firstContainer).NotTo(BeNil())
+			GinkgoWriter.Printf("[Test] pod 1 Mem req=%s (expected 256Mi)\n",
+				firstContainer.Resources.Requests.Memory().String())
+			Expect(firstContainer.Resources.Requests.Memory().Value()).To(Equal(int64(256 * 1024 * 1024)))
+
+			By("Deleting the winning ResourceOverride 'aaa-override'")
+			err = f.DeleteResourceOverride(f.Ctx, "aaa-override", nsName)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("Waiting for the webhook informer to notice the deletion")
+			time.Sleep(30 * time.Second)
+
+			By("Creating second pod — 'zzz-override' should now win (75% of 1024Mi = 768Mi)")
+			second, err := f.CreatePodWithResources(f.Ctx, "test-rodelete-2", nsName, roTestContainers())
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(func() { _ = f.DeletePod(f.Ctx, second.Name, nsName) })
+
+			secondContainer := findContainer(second.Spec.Containers, "app")
+			Expect(secondContainer).NotTo(BeNil())
+			GinkgoWriter.Printf("[Test] pod 2 Mem req=%s (expected 768Mi)\n",
+				secondContainer.Resources.Requests.Memory().String())
+			Expect(secondContainer.Resources.Requests.Memory().Value()).To(Equal(int64(768*1024*1024)),
+				"mutation should have switched to the remaining ResourceOverride")
+
+			By("Deleting the last ResourceOverride 'zzz-override'")
+			err = f.DeleteResourceOverride(f.Ctx, "zzz-override", nsName)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("Waiting for the webhook informer to notice the deletion")
+			time.Sleep(30 * time.Second)
+
+			By("Creating third pod — no ResourceOverride left, CRO config applies (50% of 1024Mi = 512Mi)")
+			third, err := f.CreatePodWithResources(f.Ctx, "test-rodelete-3", nsName, roTestContainers())
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(func() { _ = f.DeletePod(f.Ctx, third.Name, nsName) })
+
+			thirdContainer := findContainer(third.Spec.Containers, "app")
+			Expect(thirdContainer).NotTo(BeNil())
+			GinkgoWriter.Printf("[Test] pod 3 Mem req=%s (expected 512Mi)\n",
+				thirdContainer.Resources.Requests.Memory().String())
+			Expect(thirdContainer.Resources.Requests.Memory().Value()).To(Equal(int64(512*1024*1024)),
+				"pod should have fallen back to the ClusterResourceOverride config")
+
+			GinkgoWriter.Printf("[Test] ResourceOverride conflict + fallback verified\n")
+		})
+	})
+
 	Context("Deployment verification", func() {
 
 		It("should have the CRO webhook deployment running", func() {
@@ -625,6 +789,25 @@ var _ = Describe("Cluster Resource Override Operator", func() {
 		})
 	})
 })
+
+// roTestContainers is the pod used by the ResourceOverride tests, 1024Mi of memory
+// keeps the expected memory requests round numbers (25% = 256Mi, 50% = 512Mi, 75% = 768Mi)
+func roTestContainers() []corev1.Container {
+	return []corev1.Container{{
+		Name:  "app",
+		Image: "registry.k8s.io/pause:3.9",
+		Resources: corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{
+				corev1.ResourceMemory: resource.MustParse("1024Mi"),
+				corev1.ResourceCPU:    resource.MustParse("2000m"),
+			},
+			Limits: corev1.ResourceList{
+				corev1.ResourceMemory: resource.MustParse("1024Mi"),
+				corev1.ResourceCPU:    resource.MustParse("2000m"),
+			},
+		},
+	}}
+}
 
 func findContainer(containers []corev1.Container, name string) *corev1.Container {
 	for i := range containers {

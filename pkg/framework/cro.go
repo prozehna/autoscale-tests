@@ -21,6 +21,14 @@ var clusterResourceOverrideGVR = schema.GroupVersionResource{
 	Resource: "clusterresourceoverrides",
 }
 
+// resourceOverride is the namespaced CR, note that it lives in a different API
+// group than the cluster scoped ClusterResourceOverride CR
+var resourceOverrideGVR = schema.GroupVersionResource{
+	Group:    "autoscaling.openshift.io",
+	Version:  "v1",
+	Resource: "resourceoverrides",
+}
+
 // CROConfig holds the override ratios for a ClusterResourceOverride CR
 type CROConfig struct {
 	LimitCPUToMemoryPercent     int64 // CPU limit = memory limit (in Mi) * percent / 100, expressed as millicores
@@ -110,6 +118,75 @@ func (f *Framework) WaitForClusterResourceOverrideReady(ctx context.Context, tim
 		}
 		return false, nil
 	})
+}
+
+// ROConfig holds the override ratios for a namespaced ResourceOverride CR.
+// PodSelector is optional, when it is empty the ResourceOverride matches every
+// pod in the namespace.
+type ROConfig struct {
+	LimitCPUToMemoryPercent     int64
+	CPURequestToLimitPercent    int64
+	MemoryRequestToLimitPercent int64
+	PodSelector                 map[string]string
+}
+
+// CreateResourceOverride creates a ResourceOverride CR in the given namespace
+func (f *Framework) CreateResourceOverride(ctx context.Context, name, namespace string, cfg ROConfig) error {
+	spec := map[string]interface{}{
+		"podResourceOverride": map[string]interface{}{
+			"memoryRequestToLimitPercent": cfg.MemoryRequestToLimitPercent,
+			"cpuRequestToLimitPercent":    cfg.CPURequestToLimitPercent,
+			"limitCPUToMemoryPercent":     cfg.LimitCPUToMemoryPercent,
+		},
+	}
+
+	if len(cfg.PodSelector) > 0 {
+		matchLabels := map[string]interface{}{}
+		for k, v := range cfg.PodSelector {
+			matchLabels[k] = v
+		}
+		spec["podSelector"] = map[string]interface{}{
+			"matchLabels": matchLabels,
+		}
+	}
+
+	ro := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "autoscaling.openshift.io/v1",
+			"kind":       "ResourceOverride",
+			"metadata": map[string]interface{}{
+				"name":      name,
+				"namespace": namespace,
+			},
+			"spec": spec,
+		},
+	}
+
+	_, err := f.getDynamicClient().Resource(resourceOverrideGVR).Namespace(namespace).Create(ctx, ro, metav1.CreateOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to create ResourceOverride %s/%s: %w", namespace, name, err)
+	}
+	fmt.Printf("[CRO] ResourceOverride %s/%s created\n", namespace, name)
+	return nil
+}
+
+// DeleteResourceOverride removes a ResourceOverride CR from the given namespace
+func (f *Framework) DeleteResourceOverride(ctx context.Context, name, namespace string) error {
+	err := f.getDynamicClient().Resource(resourceOverrideGVR).Namespace(namespace).Delete(ctx, name, metav1.DeleteOptions{})
+	if errors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("failed to delete ResourceOverride %s/%s: %w", namespace, name, err)
+	}
+	fmt.Printf("[CRO] ResourceOverride %s/%s deleted\n", namespace, name)
+	return nil
+}
+
+// ResourceOverrideCRDExists tells if the ResourceOverride CRD is installed on the
+// cluster, older CRO operator versions do not ship it
+func (f *Framework) ResourceOverrideCRDExists(ctx context.Context) (bool, error) {
+	return f.CRDExists(ctx, "autoscaling.openshift.io", "ResourceOverride")
 }
 
 // CreateCROOptInNamespace creates a namespace with the CRO opt-in label so the
