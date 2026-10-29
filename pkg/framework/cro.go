@@ -190,7 +190,7 @@ func (f *Framework) ResourceOverrideCRDExists(ctx context.Context) (bool, error)
 }
 
 // CreateCROOptInNamespace creates a namespace with the CRO opt-in label so the
-// admission webhook will mutate pods created in it
+// admission webhook will mutate pods created in it. thin wrapper over the existing CRDExists. The ctx is accepted and ignored because CRDExists resolves through the RESTMapper, not an API call.
 func (f *Framework) CreateCROOptInNamespace(ctx context.Context, name string) error {
 	ns := &corev1.Namespace{
 		ObjectMeta: metav1.ObjectMeta{

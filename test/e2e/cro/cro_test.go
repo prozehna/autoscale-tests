@@ -266,7 +266,7 @@ var _ = Describe("Cluster Resource Override Operator", func() {
 				[]corev1.Container{{
 					Name:    "init",
 					Image:   "registry.k8s.io/pause:3.9",
-					Command: []string{"sh", "-c", "echo init && sleep 1"},
+					Command: []string{"sh", "-c", "echo i//@reviewers -> i could avoid duplication by chnage the aaa and zzz creations into a single function, but i feel it saves little and loses legibility.nit && sleep 1"},
 					Resources: corev1.ResourceRequirements{
 						Limits: corev1.ResourceList{
 							corev1.ResourceMemory: resource.MustParse("1024Mi"),
@@ -611,7 +611,7 @@ var _ = Describe("Cluster Resource Override Operator", func() {
 			exists, err := f.ResourceOverrideCRDExists(f.Ctx)
 			Expect(err).NotTo(HaveOccurred())
 			if !exists {
-				Skip("ResourceOverride CRD not present on this cluster — CRO operator is too old")
+				Skip("ResourceOverride is CRD not present on this cluster — CRO operator is likely too old")
 			}
 
 			// This is the config the webhook falls back to when no ResourceOverride
@@ -626,7 +626,7 @@ var _ = Describe("Cluster Resource Override Operator", func() {
 
 			By("Waiting for CRO admission webhook to become available")
 			err = f.WaitForClusterResourceOverrideReady(f.Ctx, 3*time.Minute)
-			Expect(err).NotTo(HaveOccurred(), "CRO admission webhook should become available")
+			Expect(err).NotTo(HaveOccurred(), "CRO admission webhook should become available before 3 minute window expiry")
 		})
 
 		It("should apply the lexicographically first ResourceOverride when several match", func() {
@@ -645,7 +645,7 @@ var _ = Describe("Cluster Resource Override Operator", func() {
 				MemoryRequestToLimitPercent: 25,
 			})
 			Expect(err).NotTo(HaveOccurred())
-
+//@reviewers - CPURequest 80 is not asserted further in the test, and so could be changed to 20without conseuquence.
 			By("Creating ResourceOverride 'zzz-override' with MemReq=75")
 			err = f.CreateResourceOverride(f.Ctx, "zzz-override", nsName, framework.ROConfig{
 				LimitCPUToMemoryPercent:     100,
@@ -672,12 +672,14 @@ var _ = Describe("Cluster Resource Override Operator", func() {
 			Expect(container.Resources.Requests.Memory().Value()).To(Equal(int64(256*1024*1024)),
 				"the alphabetically first ResourceOverride should have won")
 
+//the second and third memory request verifications are technically redundant but why not leave it.
+
 			By("Verifying the memory request is NOT the one from 'zzz-override' (75% = 768Mi)")
 			Expect(container.Resources.Requests.Memory().Value()).NotTo(Equal(int64(768 * 1024 * 1024)))
 
 			By("Verifying the memory request is NOT the CRO fallback (50% = 512Mi)")
 			Expect(container.Resources.Requests.Memory().Value()).NotTo(Equal(int64(512 * 1024 * 1024)))
-
+//@reviewers, this is also redundant
 			By("Verifying CPU request is a fraction of the CPU limit (CPUReq=20%)")
 			cpuLimit := container.Resources.Limits.Cpu().MilliValue()
 			cpuReq := container.Resources.Requests.Cpu().MilliValue()
@@ -691,6 +693,8 @@ var _ = Describe("Cluster Resource Override Operator", func() {
 			err := f.CreateCROOptInNamespace(f.Ctx, nsName)
 			Expect(err).NotTo(HaveOccurred())
 			DeferCleanup(func() { _ = f.CleanupTestNamespace(f.Ctx, nsName) })
+
+//@reviewers -> i could avoid duplication by chnage the aaa and zzz creations into a single function, but i feel it saves little and loses legibility.
 
 			By("Creating ResourceOverride 'aaa-override' with MemReq=25")
 			err = f.CreateResourceOverride(f.Ctx, "aaa-override", nsName, framework.ROConfig{
